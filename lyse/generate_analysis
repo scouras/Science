@@ -1,0 +1,1504 @@
+#! /usr/bin/perl
+
+use warnings;
+use strict;
+#push @INC, "/users/scouras/bin";
+#push @INC, "/users/scouras/bin/scouras";
+BEGIN { 
+  push @INC, "/users/scouras/code/scouras",
+             "/users/scouras/code/lyse",
+             "/users/scouras/code/plot",
+}
+require Ilmm;
+use Data::Dumper;
+
+
+####################################################################
+# BIG TODO LIST
+# 
+# Change all rmsd commands to have customizable maximum heights and smarter
+#   defaults.   
+#   RMSF should max at 4.0 by default
+#   RMSF_T should provide better discrimination in the 2-3 angstrom range w/o
+#     sacrificing the 4+ range === Thought about it some, played with it,
+#     haven't come up with a better solution
+#   RMSD_MATRIX should not max out at 5 angstroms perhaps.
+#   Almost everything needs smarter lines.  Everything that moves over time
+#     especially needs to only plot a line as often as the axis plots a label.
+#     The frequency of the labels is returned by some command.
+#   RMSD_MATRIX and RMSF_T have opposite color schemes.  This is dumb, though it
+#     makes a certain kind of sense.
+#   generate_analysis should then find the maximum rmsd over a group of
+#     simulations and use that when plotting all simulations.
+# 
+# ilmm.pm needs to know the last time the simulation was updated (by reading the 
+#   timestamp of the most recend md*.mdc.
+# generate_analysis then needs to use this as the primary factor in determining 
+#   if a simulation needs reanalysis and replotting for all analyses.
+# 
+# Determine if an image is 0 bytes in size and write over it.
+#  
+# Add ASTRAND
+####################################################################
+
+
+####################################################################
+#                     DEFAULT VALUES FOR USER CONFIGURABLE VARIABLES
+####################################################################
+
+my $ANALYSIS_MACHINE = 'mortal';
+my $PLOT_MACHINE = 'wx01';
+
+
+##### List of Analyses and other operations to perform
+
+my %ANALYSES = (
+
+  # convenience operations
+  butcher       => 1, # filet out the pdbs...
+  renumber      => 1, # only to FORCE a renumber.  If butchering, will auto-renumber.
+  
+  # analyses
+  ca_extension  => 1, 
+  dssp          => 1,
+  phipsi        => 1,
+  dihedral      => 1,
+  
+  rmsd          => 1,
+  rmsf          => 1,
+  rmsf_t        => 1,
+  rmsd_matrix   => 1,
+
+  vcont         => 1, # we can run this analysis, but we don't plot it yet.
+  
+  # concatenates images into convenient matrices
+  sub_image     => 1, # creates image concatenating all plots for a simulation, prefixed SIM
+  sim_image     => 1, # creates image concatenating all plots for a simulation group, prefixed GROUP
+);
+
+
+##### Directory to copy all the images to for convenience
+my $PICTURE_DIR = '';
+
+
+##### Mostly used for debugging, but are useful to set if you need to correct an error 
+##### made in a previous run of the program.  
+my $RUN = 1;                # Call the programs vs. print the commands
+my $OVERWRITE_ANALYSIS = 0; # force redo all analyses, in case something ended in an inconsistent state
+my $OVERWRITE_PLOTS    = 1; # force redo data plots, in case the plots messed up somehow
+
+
+##### For simulations over time, these determine about the number of
+##### pixels used to emphasize the first and last time points.
+my $START_EMPHASIS = 20;
+my $FINAL_EMPHASIS = 20;
+
+
+##### 
+# TIME RESOLUTION FOR VARIOUS ANALYSES
+
+my $RESOLUTION              =  10;
+my $CA_EXTENSION_RESOLUTION = 100;
+my $DSSP_RESOLUTION         =   0;
+my $PHIPSI_RESOLUTION       =   0;
+my $RMSD_RESOLUTION         =   1;
+my $RMSF_T_RESOLUTION       = 500;
+my $RMSD_MATRIX_RESOLUTION  =  10;
+my $VCONT_RESOLUTION        =  10;
+
+
+##### LIBRARIES
+my @LIBRARIES = ();
+
+##### DSSP FLAGS
+my $DSSP_E_HBOND  = -0.5; # hbond energy cutoff for dssp (default is -0.5)
+my $DSSP_BRIDGES  = '';   # detect bridges flag
+my $DSSP_EXTENDED = '';   # report extended structure
+my $DSSP_OVERRIDE = '';   # override all over flags with this command
+
+##### PHIPSI FLAGS
+my $PHIPSI_SS_DEF    = "/users/scouras/analysis/ss.def";
+my $PHIPSI_MOLECULE  = 0;
+my $PHIPSI_OVERRIDE  = ''; # Overriding other flags with this command
+
+##### RMSD FLAGS
+my @RMSD_BASIC_RESIDUES   = ( '' );
+my $RMSD_BASIC_SELECTION  = '0@CA';     # Atoms to compare, default just the alpha carbons
+my $RMSD_BASIC_REFERENCE  = 'min.pdb';  # Reference structure (pdb format)
+my $RMSD_BASIC_OVERRIDE   = '';         # Overriding other flags with this command
+
+my $RMSD_MATRIX_SELECTION = '0@CA';     # Atoms to compare, default just the alpha carbons
+my $RMSD_MATRIX_REFERENCE = 'min.pdb';  # Reference structure (pdb format)
+my $RMSD_MATRIX_OVERRIDE  = '';         # Overriding other flags with this command
+
+##### PLOT DIMENSIONS
+my $STD_PLOTS_WIDE   =    3;
+my $STD_PLOTS_HIGH   =    3;
+my $STD_PLOT_HEIGHT  =  768;
+my $STD_PLOT_WIDTH   = 1024;
+
+
+####################################################################
+#################################### END USER CONFIGURABLE VARIABLES
+####################################################################
+
+
+
+
+
+# CVS VERSION INFORMATION (AUTOMAGICALLY GENERATED BY CVS)
+'$Revision: 1.1.1.1 $'             =~ /^.Revision: (.*) \$/;   my $REVISION  = $1;
+'$Date: 2008/11/19 01:18:41 $'  =~ /^.Date: (.*) \$/;       my $CHECKEDIN = $1;
+'$Author: scouras $'            =~ /^.Author: (.*) \$/;     my $AUTHOR    = $1;
+
+
+# CURRENT EXECUTION INFORMATION
+my $PWD   = `pwd`;        chomp $PWD;
+my $HOST  = `hostname`;   chomp $HOST;
+my $TIME  = `date`;       chomp $TIME;
+my $USER  = `whoami`;     chomp $USER;
+
+
+# Print welcome and configuration
+print "Welcome to $0\n"
+    . "If you have problems or suggestions,\nplease contact Alex at scouras\@u.washington.edu\n\n"
+    . "Version Information\n"
+    . "  Revision: $REVISION\n"
+    . "  Author:   $AUTHOR\n"
+    . "  Revised:  $CHECKEDIN\n"
+    . "Current Execution\n"
+    . "  User:     $USER\n"
+    . "  Host:     $HOST\n"
+    . "  Time:     $TIME\n"
+    . "  CWD:      $PWD\n"
+    ;
+
+
+# GET FILES FROM COMMAND LINES and ADD DEFAULT CONFIGURATION FILES
+my @FILES = ();
+my @DEFAULT_FILES = ( 
+  "/users/$USER/generate_analysis.conf", 
+);
+push @DEFAULT_FILES, "/users/$USER/current.list" if not scalar @ARGV;
+
+foreach my $file ( @DEFAULT_FILES ) {
+  if ( -e $file ) {
+    push @FILES, $file;
+  }
+}
+push @FILES, @ARGV;
+
+my @XS = qw(wx01 wx03 wx05 wx06 wx08 wx09 wx10 wx11);
+my $X = $XS[int rand @XS];
+
+########## VARIOUS PROGRAMS AND DIRECTORIES
+my $SHELL             = "";
+#my $PLOT_SHELL        = "";
+#my $ANALYZE_SHELL     = "";
+my $PLOT_SHELL        = "ssh -X $X";
+my $ANALYZE_SHELL     = "ssh mortal";
+#my $SHELL             = "bash -c \n";
+my $BIN_DIR           = "/users/scouras/code/scouras";
+my $PLOT_DIR          = "/users/scouras/code/plot";
+my $ANALYZE           = "$ANALYZE_SHELL $BIN_DIR/analyze_custom";
+my $BUTCHER           = "$ANALYZE_SHELL $BIN_DIR/butcher";
+my $CA_CADIST         = "$BIN_DIR/ca_cadist";
+my $PLOT_DSSP         = "$PLOT_SHELL $PLOT_DIR/plot_dssp";
+my $PLOT_PHIPSI       = "$PLOT_SHELL $PLOT_DIR/plot_phipsi";
+my $PLOT_CA_EXTENSION = "$PLOT_SHELL $PLOT_DIR/plot_ca_extension";
+my $PLOT_RMSD         = "$PLOT_SHELL $PLOT_DIR/plot_rmsd";
+my $PLOT_RMSF         = "$PLOT_SHELL $PLOT_DIR/plot_rmsf";
+my $PLOT_RMSF_T       = "$PLOT_SHELL $PLOT_DIR/plot_rmsf_t";
+my $PLOT_RMSD_MATRIX  = "$PLOT_SHELL $PLOT_DIR/plot_rmsd_matrix";
+my $RENUMBER_PDBS     = "$SHELL $BIN_DIR/renumber_pdbs";
+
+
+
+
+#===== READ CONFIGURATIONS
+
+my @SIMULATIONS = ();
+
+foreach my $FILE (@FILES) {
+  if ( -e $FILE ) {
+    print "Reading configuration file: $FILE\n";
+    my @SIMS;
+    open FILE, $FILE or die "Couldn't open structure list, '$FILE'. $!";
+    my $contents = join '', (<FILE>);
+    close FILE or die "Couldn't close structure list, '$FILE'. $!";
+
+    eval $contents;
+    push @SIMULATIONS, @SIMS;
+
+    die $@ if $@;
+  }
+}
+ 
+if ( not scalar @FILES ) {
+  die "You need to enter a simulation list in the format in /users/scouras/analysis/prion_hamster_original.list\n";
+}
+
+
+  
+my %IMAGES = ();
+
+my @GRAPHED_ANALYSES = ( "ca_extension", "dssp", 'phipsi', 'rmsd', 'rmsf', 'rmsf_t', 'rmsd_matrix' );
+my @ALL_ANALYSES = (@GRAPHED_ANALYSES, "vcont");
+
+    
+my $PLOTS_HIGH = $ANALYSES{'ca_extension'} 
+               + $ANALYSES{'dssp'} 
+               + $ANALYSES{'phipsi'};
+
+$ANALYSES{"rmsd_group"} = $ANALYSES{'rmsd'} 
+                        + $ANALYSES{'rmsf'} 
+                        + $ANALYSES{'rmsf_t'}
+                        + $ANALYSES{'rmsd_matrix'}
+                        ;
+
+my $LIBRARIES = join '', map "library=$_ ", @LIBRARIES;
+
+# Print analysis configuration
+print "CONFIGURATION:\n"
+    . ( $RUN ? "\tRunning analyses\n" : "\tDebug mode: Not running analyses\n" ) 
+    . ( $OVERWRITE_ANALYSIS ? "\tOverwriting analyses\n" : "" ) 
+    . ( $OVERWRITE_PLOTS    ? "\tOverwriting plots\n" : "" ) 
+    . "ANALYSES:\n"
+    ;
+
+foreach my $analysis ( @ALL_ANALYSES ) {
+  if ( $ANALYSES{$analysis} ) { print "\t$analysis\n"; }
+}
+
+    
+print "SIMULATIONS (" . (scalar @SIMULATIONS) . "): \n"
+    . ( join "\n", map { "\t$_->{'title'}" } @SIMULATIONS )
+    . "\n\n";
+   
+print "LIBRARIES (" . (scalar @LIBRARIES) . "): \n"
+    . ( join '', map { "\t$_\n" } @LIBRARIES )
+    . "\n";
+    
+# Determine if we are copying user pictures
+my $WRITE_PICTURES = 0;
+$PICTURE_DIR =~ s/~/\/users\/$USER/;
+if ( $PICTURE_DIR ) {
+  if ( -e $PICTURE_DIR and -d $PICTURE_DIR ) {
+    print "Copying all pictures into '$PICTURE_DIR'\n";
+    $WRITE_PICTURES = 1;
+  } else {
+    print "Picture directory '$PICTURE_DIR' could not be found.\n";
+  }
+} else {
+  print "If you set the \$PICTURE_DIR variable, this script will copy all pictures into that directory\n";
+}
+
+
+
+
+####################################################################
+########################################################## MAIN LOOP
+####################################################################
+
+
+my $result;
+my $directory_count = scalar @SIMULATIONS;
+my $directory_index = 1;
+
+#===== Process directories
+foreach my $simulation ( @SIMULATIONS ) {
+
+  next if $simulation->{'skip'};
+
+  my $dir         = $simulation->{'dir'};
+  my $title       = $simulation->{'title'};
+  my $start_res   = $simulation->{'start_res'};
+  my $limit_time  = (exists $simulation->{'limit_time'} and $simulation->{'limit_time'}) || 0;
+  
+  print "\n\n########## PROCESSING SIMULATION $title ($directory_index of $directory_count) ##########\n"
+      . "  DIRECTORY: $dir\n";
+  $directory_index++;
+  if ( not chdir $dir )  {
+    print "!!! Couldn't chdir to simulation directory '$dir'. $!";
+    next;
+  }
+  
+  my @all_subdirs = grep { /^\d+$/ and -d $_ } glob ( "[1-9]*" );
+  my $numdirs = scalar @all_subdirs;
+  print "  Found $numdirs subdirectories: @all_subdirs\n";
+
+  # Limit subdirs if directed by user configuration
+  my @subdirs = ();
+  if ($simulation->{'subdirs'}) {
+    my @user_subdirs = @{$simulation->{'subdirs'}};
+    print "  Limiting analysis to subdirectories: " . (join ', ', @user_subdirs) . "\n";
+    foreach my $sub ( @all_subdirs ) {
+      if ( grep { $_ eq $sub } @user_subdirs ) {
+        push @subdirs, $sub;
+      }
+    }
+  } else {
+    @subdirs = @all_subdirs;
+  }
+  $numdirs = scalar @subdirs;
+  
+  # Test that there are subdirectories left
+  if ( not $numdirs ) {
+    print "!! No subdirectories found!  Skipping to next simulation group!\n";
+    next;
+  }
+      
+
+  my $PLOTS_WIDE = $numdirs;
+  #my $PLOT_HEIGHT = int($STD_PLOTS_HIGH / $PLOTS_HIGH * $STD_PLOT_HEIGHT);
+  #my $PLOT_WIDTH  = int($STD_PLOTS_WIDE / $PLOTS_WIDE * $STD_PLOT_WIDTH);
+  my $PLOT_HEIGHT = $STD_PLOT_HEIGHT;
+  my $PLOT_WIDTH  = $STD_PLOT_WIDTH;
+
+  #===== Process subdirectories
+  foreach my $sub (@subdirs) {
+    
+    my $read_only = $simulation->{'read_only'} || 0;
+    
+    if ( not chdir "$dir/$sub" ) {
+      print "!!! Couldn't chdir to repeat directory '$dir/$sub'.$!";
+      next;
+    }
+
+    print "\n\n== Subdirectory: $sub\n";
+    
+    # Parse the directory and get an ilmm object
+    my $ilmm = Ilmm::parse_simulation_directory("$dir/$sub");
+    if ( not $ilmm ) {
+      print "!!! COULD NOT PARSE SUBDIRECTORY, WILL LOOK FOR STANDARD ANALYSIS DIRECTORIES TO PLOT.\n";
+      $read_only=1;
+      $ilmm = Ilmm::new_empty();
+    } 
+
+    # Get first protein name (assumes only one protein per simulation for now).
+    # Skip if there are none.
+    my $is = (sort {length($a)<=>length($b)} glob ( "$dir/$sub/*.is" ))[0];   
+    if ( not $is ) {
+      print "!!  No .is files in directory, skipping.\n";
+      next;
+    }
+    $is =~ /.*\/([\w\d\.-]+)\.is$/;
+    my $protein = $1;   
+    my $is_linux = "$dir/$sub/$protein.linux.is";
+    if ( not -e $is_linux ) {
+      `~scouras/code/scouras/format_conversion linux $is`;
+    }
+
+
+    printf "==== Protein: %s\tTime: %.4f ns\tTimestep: %.4f fs\n", 
+            $protein,
+            $ilmm->{'total_time'} / 1000,
+            $ilmm->{'timestep'} * 1000;
+
+    if (not $limit_time or ($limit_time > $ilmm->{'total_time'})) { $limit_time = $ilmm->{'total_time'} };
+
+    my $ca_extension_res  = $simulation->{'ca_extension_res'} || $CA_EXTENSION_RESOLUTION || $RESOLUTION;
+    my $dssp_res          = $simulation->{'dssp_res'}         || $DSSP_RESOLUTION         || $RESOLUTION;
+    my $phipsi_res        = $simulation->{'phipsi_res'}       || $PHIPSI_RESOLUTION       || $RESOLUTION;
+    my $vcont_res         = $simulation->{'vcont_res'}        || $VCONT_RESOLUTION        || $RESOLUTION;
+    my $rmsd_res          = $simulation->{'rmsd_res'}         || $RMSD_RESOLUTION         || $RESOLUTION;
+    my $rmsf_t_res        = $simulation->{'rmsf_t_res'}       || $RMSF_T_RESOLUTION       || 250;
+    my $rmsd_matrix_res   = $simulation->{'rmsd_matrix_res'}  || $RMSD_MATRIX_RESOLUTION  || $RESOLUTION;
+
+    my @req_times_ca_extension = ();
+    my @req_times_dssp         = ();
+    my @req_times_phipsi       = ();
+    my @req_times_vcont        = ();
+    my %req_times_rmsd         = ( rmsd=>[], rmsf_t=>[], rmsd_matrix=>0 );
+    my @required_filet_files   = ();
+    for ( my $i = 0; $i < $limit_time; $i += 1 ) {
+      push @req_times_ca_extension,       $i if not  $i % $ca_extension_res;
+      push @req_times_dssp,               $i if not  $i % $dssp_res;
+      push @req_times_phipsi,             $i if not  $i % $phipsi_res;
+      push @req_times_vcont,              $i if not  $i % $vcont_res;
+      push @{$req_times_rmsd{'rmsd'}},    $i if not  $i % $rmsd_res;
+      push @{$req_times_rmsd{'rmsf_t'}},  $i if not ($i % $rmsf_t_res) - 1;
+      $req_times_rmsd{'rmsd_matrix'}++       if not  $i % $rmsd_matrix_res;
+      push @required_filet_files, sprintf "%010.2fps.pdb", $i if not $i % $ca_extension_res;
+    }
+
+
+
+
+    #===============================================================
+    #======================================================  BUTCHER
+    #====================================================== RENUMBER
+    #===============================================================
+    
+    my $needs_butcher  = 0;
+    my $needs_renumber = 0;
+    
+    if ($ANALYSES{'butcher'} or $ANALYSES{'ca_extension'}) {
+      
+      #----------------------------------------------------- Butcher
+      # Butchering is very computationally expensive, so we skip
+      # it if at all possible.
+
+      #----- Determine if we need to butcher
+      if ( $read_only ) {
+        # do nothing, we can't analyze
+      } elsif ( not -e "$dir/$sub/filet" ) {
+        $needs_butcher = 1;
+      } elsif ( $OVERWRITE_ANALYSIS and not $simulation->{'read_only'} ) {
+        $needs_butcher = 1;
+      } else {
+
+        #print join ', ', "REQUIRED FILES: ", @required_filet_files, "\n";
+        foreach my $file ( @required_filet_files ) { 
+          if ( not -e "$dir/$sub/filet/$file" ) { 
+            print "\tMissing file $dir/$sub/filet/$file\n";
+            $needs_butcher = 1;
+            last;
+          }
+        }
+      }
+
+      #----- Do the butcher
+      if ( $needs_butcher ) {
+        print "==== BUTCHERING FILES\n";
+        my $butcher_command = "$BUTCHER $protein $ca_extension_res dir=$dir/$sub " 
+                            . ($OVERWRITE_ANALYSIS ? "overwrite " : "" ) 
+                            . "2>&1 1> butcher.log";
+        try_command ( "Butcher", $butcher_command, "$dir/$sub" );
+        $needs_renumber = 1
+      
+
+      } else {
+        print "==== BUTCHERING SKIPPED: ALL FILES ARE ALREADY FILETED\n";
+      }
+    }
+        
+    #-------------------------------------- Renumber butchered files
+    if ( not $read_only 
+         and ( $ANALYSES{'renumber'} 
+             or ( $needs_renumber and $start_res != 1  ) ) ) {
+      if ( -e "$dir/$sub/filet" and -d "$dir/$sub/filet" ) {
+        print "==== RENUMBERING FILES\n";
+        my $renumber_command = "$RENUMBER_PDBS $dir/$sub/filet $start_res 2>&1";
+        try_command ( "Renumber", $renumber_command, "$dir/$sub" );
+      } else {
+        print "==== SKIPPING RENUMBER, NO FILET DIRECTORY\n";
+      }
+    } else {
+      print "==== RENUMBERING SKIPPED\n";
+    }
+
+    $IMAGES{$dir}{$sub}{'image'} = 'skip';
+    
+    #===============================================================
+    #================================================== CA Extension
+    #===============================================================
+
+CA_EXTENSION: {
+
+    $IMAGES{$dir}{$sub}{'ca_extension'} = 'skip';
+    
+    if ( $read_only and not -e "$dir/$sub/ca_extension/all/extend3.dat") {
+      last CA_EXTENSION;
+    }
+
+    my $ca_title = "CA Extension - $title $sub";
+    my $ca_extension_file = "ca_extension/all/extend3.dat";
+   
+    if ($ANALYSES{'ca_extension'}) {
+
+      print "==== CA EXTENSION\n";
+      my $needs_ca_extension = 0;
+
+CA_EXTENSION_TEST: {
+
+      # Don't do anything 
+      if ( $read_only ) {
+        last CA_EXTENSION_TEST;
+      # Need to redo ca_extension if we just butchered again
+      } elsif ( $needs_butcher ) {
+        $needs_ca_extension = 1;
+        
+      # Test for standard data files
+      } elsif ( not -e "$dir/$sub/ca_extension" 
+        or not -e "$dir/$sub/ca_extension/all"
+        or not -e "$dir/$sub/ca_extension/all/extend3.dat" ) {
+        print "\tCA Extension data files do not exist.\n";
+        $needs_ca_extension = 1;
+      } elsif ( $OVERWRITE_ANALYSIS and not $simulation->{'read_only'} ) {
+        print "\tCA Extension data is getting overwritten\n";
+        $needs_ca_extension = 1;
+      } else { 
+        
+        # Test that all the files are in all.list
+        my $all_list = `cat $dir/$sub/ca_extension/all/all.list`;
+        my @all_list_lines = split /\n/m, $all_list;
+        my $all_list_count = scalar @all_list_lines;
+        if (not $all_list_count == scalar @required_filet_files) {
+          print "\tall.list has a different number of files ($all_list_count) than is required "
+              . (scalar @required_filet_files) .  "\n"
+              . "\tRerunning ca_extension analysis.\n";
+          $needs_ca_extension = 1;
+          last CA_EXTENSION_TEST;
+        }
+
+        foreach my $file (@required_filet_files) {
+          if ( $all_list !~ /$file/m ) {
+            print "\tMissing file '$file' from all.list.  Rerunning ca_extension analysis.\n";
+            $needs_ca_extension = 1;
+            last CA_EXTENSION_TEST;
+          }
+        }
+
+        # Test extend3.dat modification time
+        if ( (-M "$dir/$sub/ca_extension/all/all.list")
+           < (-M "$dir/$sub/$ca_extension_file") ) {
+          print "\tExtend3.dat is older than all.list.  Rerunning ca_extension analysis.\n";
+          $needs_ca_extension = 1;
+          last CA_EXTENSION_TEST;
+        }
+
+        # Test extend3.dat size
+        my $all_count = scalar @required_filet_files;
+        my $extend3_file = `cat $dir/$sub/$ca_extension_file`;
+        my @extend3_lines = split /\n/m, $extend3_file;
+        my $extend3_count = scalar @extend3_lines;
+        if ( $extend3_count != scalar @required_filet_files ) {
+          print "\textend3.dat has the wrong number of lines "
+              . "(extend3.dat=$extend3_count, all.list=$all_count).\n"
+              . "\tRerunning ca_extension analysis.\n";
+          $needs_ca_extension = 1;
+          last CA_EXTENSION_TEST;
+        }
+      }
+      } # END CA_EXTENSION_TEST
+        
+        
+        
+
+      #====================== Run CA Extension analysis if necessary
+
+      if ($needs_ca_extension) {
+        
+        print "====== EXECUTING CA EXTENSION ANALYSIS\n";
+        
+        #------------------------------- Create file list from filet
+
+        # Create the directories 
+        if ( not -e "$dir/$sub/ca_extension" ) {
+          mkdir "$dir/$sub/ca_extension" 
+            or die "Couldn't create directory $dir/$sub/ca_extension/. $!"; }
+        if ( not -e "$dir/$sub/ca_extension/all" ) {
+          mkdir "$dir/$sub/ca_extension/all" 
+            or die "Couldn't create directory $dir/$sub/ca_extension/all/. $!"; }
+
+        # Write the file list
+        if ($RUN) {
+          open CA_OUT, ">$dir/$sub/ca_extension/all/all.list"
+            or die "Couldn't write ca_extension/all/all.list. $!";
+            
+          print CA_OUT join "\n", (map { "$dir/$sub/filet/$_"} @required_filet_files), '';
+  
+          close CA_OUT 
+            or die "Couldn't close ca_extension/all/all.list. $!";
+        } else {
+          print "\tWriting files to all.list\n";
+        }
+
+        
+
+        #----------------------------- Execute CA Extension Analysis
+        chdir "$dir/$sub/ca_extension/all" or die "Couldn't chdir for ca_extension. $!";
+        try_command ( "CA Extension", 
+                      "$CA_CADIST all.list 2>&1", 
+                      "$dir/$sub/ca_extension/all/" );
+                    
+                    
+        chdir "$dir/$sub" or die "Couldn't chdir to return from ca_extension. $!";
+
+      # Reanalysis not needed
+      } else {  
+        print "====== SKIPPING CA EXTENSION ANALYSIS\n";
+      }
+
+      #====================================== PLOT CA_EXTENSION DATA
+
+      # Test if image is newer than data file, if so can skip
+      my $ca_extension_png = get_png_name ( "$dir/$sub/ca_extension/all", $ca_title );
+      $IMAGES{$dir}{$sub}{'ca_extension'} = $ca_extension_png;
+      if ( $needs_ca_extension 
+        or not -e $ca_extension_png 
+        or -z $ca_extension_png
+        or $OVERWRITE_PLOTS 
+        or (-e "$dir/$sub/$ca_extension_file" and
+             ( -M $ca_extension_png > -M "$dir/$sub/$ca_extension_file" ) ) ) {
+      
+        print "====== PLOTTING CA EXTENSION DATA\n";
+
+        my $ca_command = 
+          "$PLOT_CA_EXTENSION $dir/$sub/ca_extension/all/extend3.dat "
+                            . "res=$start_res "
+                            . "ps=$ca_extension_res "
+                            . "start=$START_EMPHASIS "
+                            . "final=$FINAL_EMPHASIS "
+                            . "title=\\\"$ca_title\\\" "
+                            . "height=$PLOT_HEIGHT "
+                            . "width=$PLOT_WIDTH "
+                            . "2>&1 "
+                            ;
+        try_command ( "CA Extension", $ca_command, "$dir/$sub" );  
+      } else { 
+        print "====== SKIPPING CA EXTENSION PLOT\n";
+      }
+      
+    } 
+    
+} # END CA EXTENSION BLOCK
+    
+
+    #===============================================================
+    #========================================================== DSSP
+    #===============================================================
+
+DSSP: {
+    
+    $IMAGES{$dir}{$sub}{'dssp'} = 'skip';
+    
+    chdir "$dir/$sub" 
+      or die "Couldn't chdir to '$dir/$sub' for DSSP analysis. $!";
+    
+    my $dssp_title = "DSSP - $title $sub";
+    my @dssp_dirs = sort grep { -d $_ } glob ( "dssp/[0-9]*" );
+    my $dssp_dir = $dssp_dirs[0];
+
+    if ( not $dssp_dir and $read_only ) { last DSSP };
+    
+    if ($ANALYSES{'dssp'}) {
+      print "==== DSSP\n";
+      print "\tPotential DSSP directories: " . (join ', ', @dssp_dirs)  . "\n";
+      my $needs_dssp = 0;
+      
+      # Don't run analysis
+      if ( $read_only ) {
+        
+      #----- Determine if the needed files are there
+      } elsif ( not $dssp_dir ) {
+        print "\tDSSP directory not found.\n";
+        $needs_dssp = 1;
+      } elsif ( not -e "$dir/$sub/$dssp_dir/dssp.dat" ) {
+        print "\tDSSP analysis file not found.\n";
+        $needs_dssp = 1;
+
+      #----- Check that all timepoints are included in the file
+      } else {
+        my $old_dssp = `cat $dir/$sub/$dssp_dir/dssp.dat`;
+        foreach my $t ( @req_times_dssp ) {
+          if ( not $old_dssp =~ /^$t\./m ) {
+            print "\tDSSP is missing timepoint $t\n";
+            $needs_dssp = 1;
+            last;
+          }
+        } 
+      } 
+    
+      #=========================================== RUN DSSP ANALYSIS
+
+      if ( $needs_dssp or ($OVERWRITE_ANALYSIS and not $simulation->{"read_only"} )) {
+        print "====== EXECUTING DSSP ANALYSIS\n";
+        `unlink dssp.log` if -e "dssp.log" and $RUN;
+        my $dssp_line = ($DSSP_OVERRIDE or "dssp $DSSP_E_HBOND $DSSP_BRIDGES $DSSP_EXTENDED");
+        my $dssp_analysis_command = 
+          "$ANALYZE $protein dssp \\\"$dssp_line\\\" $LIBRARIES datadir=$dir/$sub targetdir=$dir/$sub 2>&1";
+
+        try_command ( "DSSP ANALYSIS", $dssp_analysis_command, "$dir/$sub");
+        @dssp_dirs = sort grep { -d $_ } glob ( "dssp/[0-9]*" );
+        $dssp_dir = $dssp_dirs[0];  
+      } else {
+        print "====== SKIPPING DSSP ANALYSIS\n";
+      }
+
+      #============================================== PLOT DSSP DATA
+
+      my $dssp_png = get_png_name ( "$dir/$sub/$dssp_dir", $dssp_title );
+      $IMAGES{$dir}{$sub}{'dssp'} = $dssp_png;
+      
+      if ( $needs_dssp 
+        or -z $dssp_png
+        or $OVERWRITE_PLOTS
+        or ( -e $dssp_png and
+             ( -M $dssp_png > -M "$dir/$sub/$dssp_dir/dssp.dat" ) ) ) {
+
+        print "====== PLOTTING DSSP DATA\n";
+  
+        # Crap, something went wrong.
+        if ( not $dssp_dir or not -e $dssp_dir ) {
+          die "DSSP analysis did not execute properly.\n"
+            . "The DSSP directory '$dssp_dir' was not found.\n";
+        }
+  
+        my $dssp_command = 
+          "$PLOT_DSSP $dir/$sub/$dssp_dir/dssp.dat "
+                    . "res=$start_res "
+                    . "ps=$dssp_res "
+                    . "start=$START_EMPHASIS "
+                    . "final=$FINAL_EMPHASIS "
+                    . "title=\\\"$dssp_title\\\" "
+                    . "height=$PLOT_HEIGHT "
+                    . "width=$PLOT_WIDTH "
+                    . "2>&1 "
+                    ;
+        try_command ( "DSSP", $dssp_command, "$dir/$sub" );
+
+      } else {
+        print "====== SKIPPING DSSP PLOT\n";
+      }
+    }
+} # END DSSP BLOCK
+    
+
+    
+
+    #===============================================================
+    #======================================================== PHIPSI
+    #===============================================================
+  
+PHIPSI: {
+
+    $IMAGES{$dir}{$sub}{'phipsi'} = 'skip';
+    
+    chdir "$dir/$sub" 
+      or die "Couldn't chdir to '$dir/$sub' for PHIPSI analysis. $!";
+    
+    my $phipsi_title = "PhiPsi - $title $sub";
+    my @phipsi_dirs = sort grep { -d $_ } glob ( "phipsi/[0-9]*" );
+    my $phipsi_dir = $phipsi_dirs[0];    
+
+    if ( not $phipsi_dir and $read_only ) { 
+      #$IMAGES{$dir}{$sub}{'phipsi'} = 'skip';
+      last PHIPSI; 
+    }
+
+    if ($ANALYSES{'phipsi'}) {
+      
+      print "==== PHIPSI\n"; 
+      
+      my $needs_phipsi = 0;
+      
+      # Don't do analysis if readonly
+      if ( $read_only ) {
+      
+      #----- Determine if the needed files are there
+      } elsif ( not $phipsi_dir ) {
+        print "\tPHIPSI directory not found.\n";
+        $needs_phipsi = 1;
+      } elsif ( not -e "$dir/$sub/$phipsi_dir/conf.dat" ) {
+        print "\tPHIPSI analysis file not found.\n";
+        $needs_phipsi = 1;
+
+      #----- Check that all timepoints are included in the file
+      } else {
+        my $old_phipsi = `cat $dir/$sub/$phipsi_dir/conf.dat`;
+        foreach my $t ( @req_times_phipsi ) {
+          if ( not $old_phipsi =~ /^$t\./m ) {
+            print "\tPHIPSI is missing timepoint $t\n";
+            $needs_phipsi = 1;
+            last;
+          }
+        } 
+      } 
+      
+      #========================================= RUN PHIPSI ANALYSIS
+      if ( $needs_phipsi or 
+           ( $OVERWRITE_ANALYSIS and not $simulation->{'read_only'} ) ) {
+
+        print "====== EXECUTING PHIPSI ANALYSIS\n";
+        
+        `unlink phipsi.log` if -e "phipsi.log" and $RUN;
+        my $phipsi_line = ($PHIPSI_OVERRIDE or "phipsi $PHIPSI_SS_DEF $PHIPSI_MOLECULE");
+        my $phipsi_analysis_command = 
+          "$ANALYZE $protein phipsi \\\"$phipsi_line\\\" $LIBRARIES datadir=$dir/$sub targetdir=$dir/$sub 2>&1";
+
+        try_command ( "PHIPSI ANALYSIS", $phipsi_analysis_command, "$dir/$sub");
+
+        @phipsi_dirs = sort grep { -d $_ } glob ( "phipsi/[0-9]*" );
+        $phipsi_dir = $phipsi_dirs[0];   
+      } else {
+        print "====== SKIPPING PHIPSI ANALYSIS\n";
+      }
+
+      #============================================ PLOT PHIPSI DATA
+
+      my $phipsi_png = get_png_name ( "$dir/$sub/$phipsi_dir", $phipsi_title );
+      $IMAGES{$dir}{$sub}{'phipsi'} = $phipsi_png;
+      if ( $needs_phipsi 
+        or -z $phipsi_png
+        or $OVERWRITE_PLOTS
+        or ( -e "$dir/$sub/$phipsi_dir/conf.dat" and -e $phipsi_png and 
+             ( -M $phipsi_png > -M "$dir/$sub/$phipsi_dir/conf.dat" ) ) ) {
+
+        print "====== PLOTTING PHIPSI DATA\n";
+  
+        # Crap, something went wrong.
+        if ( not $phipsi_dir or not -e $phipsi_dir ) {
+          die "PHIPSI analysis did not execute properly.\n"
+            . "The PHIPSI directory '$phipsi_dir' was not found.\n";
+        }
+  
+        my $phipsi_command = 
+          "$PLOT_PHIPSI $dir/$sub/$phipsi_dir/ "
+                     . "res=$start_res "
+                     . "ps=$dssp_res "
+                     . "start=$START_EMPHASIS "
+                     . "final=$FINAL_EMPHASIS "
+                     . "title=\\\"$phipsi_title\\\" "
+                     . "height=$PLOT_HEIGHT "
+                     . "width=$PLOT_WIDTH "
+                     . "2>&1 "
+                     ;
+        try_command ( "PhiPsi", $phipsi_command, "$dir/$sub" );
+      } else {
+        print "====== SKIPPING PHIPSI PLOT\n";
+      }
+    
+    }    
+    
+
+} # END PHIPSI BLOCK
+
+
+
+
+#GLU ASP ( OE1, OE2, OD1, OD2 )
+#HIS LYS ARG ( ND1, NE2, NZ, NH1, NH2 )
+#selectA=:GLU,GLH,ASP,ASH@:OE2,OE2,OD1,OD2 SELECTB=:ARG,LYS@NZ,NH1,NH2
+
+
+    #===============================================================
+    #========================================================= VCONT
+    #===============================================================
+  
+VCONT: {
+
+    $IMAGES{$dir}{$sub}{'vcont'} = 'skip';
+    
+    chdir "$dir/$sub" 
+      or die "Couldn't chdir to '$dir/$sub' for VCONT analysis. $!";
+    
+    my $vcont_title = "VCONT - $title $sub";
+    my @vcont_dirs = sort grep { -d $_ } glob ( "vcont/[0-9]*" );
+    my $vcont_dir = $vcont_dirs[0];    
+    #my @vcont_saltbridge_dirs = sort grep { -d $_ } glob ( "vcont_saltbridge/[0-9]*" );
+    #my $vcont_saltbridge_dir = $vcont_saltbridge_dirs[0];    
+
+    if ( not $vcont_dir and $read_only ) { 
+      #$IMAGES{$dir}{$sub}{'vcont'} = 'skip';
+      last VCONT; 
+    }
+
+    if ($ANALYSES{'vcont'}) {
+      
+      print "==== VCONT\n"; 
+      
+      my $needs_vcont = 0;
+      
+      # Don't do analysis if readonly
+      if ( $read_only ) {
+      
+      #----- Determine if the needed files are there
+      } elsif ( not $vcont_dir ) {
+        print "\tVCONT directory not found.\n";
+        $needs_vcont = 1;
+      } elsif ( not -e "$dir/$sub/$vcont_dir/total.tab" ) {
+        print "\tVCONT analysis file not found.\n";
+        $needs_vcont = 1;
+  
+      #----- TODO: Check that analysis is newer than last mdc file?
+      #----- Then add to all other analyses as well.
+      } elsif ( 0 ) {
+
+      #----- Check that all timepoints are included in the file
+      } else {
+        my $old_vcont = `cat $dir/$sub/$vcont_dir/total.tab`;
+        foreach my $t ( @req_times_vcont ) {
+          if ( not $old_vcont =~ /^$t\./m ) {
+            print "\tVCONT is missing timepoint $t\n";
+            $needs_vcont = 1;
+            last;
+          }
+        } 
+      } 
+      
+      #========================================= RUN VCONT ANALYSIS
+      if ( $needs_vcont or 
+           ( $OVERWRITE_ANALYSIS and not $simulation->{'read_only'} ) ) {
+
+        print "====== EXECUTING VCONT ANALYSIS\n";
+
+        # normal vcont all vs. all contacts
+        `unlink vcont.log` if -e "vcont.log" and $RUN;
+        my $vcont_analysis_command = 
+          "$ANALYZE $protein vcont \\\"vcont 0 min.pdb\\\" datadir=$dir/$sub targetdir=$dir/$sub $LIBRARIES 2>&1";
+
+        try_command ( "VCONT ANALYSIS", $vcont_analysis_command, "$dir/$sub");
+
+        # salt bridge only contacts
+        #`unlink vcont_saltbridge.log` if -e "vcont_saltbridge.log" and $RUN;
+        #my $vcont_saltbridge_analysis_command = 
+        #  "$ANALYZE $protein vcont 'title=saltbridge' 'vcont 0 min.pdb  selectA=:GLU,ASP,GLH,ASH\@OE1,OE2,OD1,OD2 selectB=:ARG,LYS\@NZ,NH1,NH2' 2>&1";
+
+        #try_command ( "VCONT SALTBRIDGE ANALYSIS", $vcont_saltbridge_analysis_command, "$dir/$sub");
+
+        @vcont_dirs = sort grep { -d $_ } glob ( "vcont/[0-9]*" );
+        $vcont_dir = $vcont_dirs[0];   
+      } else {
+        print "====== SKIPPING VCONT ANALYSIS\n";
+      }
+
+      # TODO: Write plotting program
+      #============================================ PLOT PHIPSI DATA
+
+#      my $phipsi_png = get_png_name ( "$dir/$sub/$phipsi_dir", $phipsi_title );
+#      $IMAGES{$dir}{$sub}{'phipsi'} = $phipsi_png;
+#      if ( $needs_phipsi 
+#        or $OVERWRITE_PLOTS
+#        or ( -e "$dir/$sub/$phipsi_dir/conf.dat" and -e $phipsi_png and 
+#             ( -M $phipsi_png > -M "$dir/$sub/$phipsi_dir/conf.dat" ) ) ) {
+#
+#        print "====== PLOTTING PHIPSI DATA\n";
+#  
+#        # Crap, something went wrong.
+#        if ( not $phipsi_dir or not -e $phipsi_dir ) {
+#          die "PHIPSI analysis did not execute properly.\n"
+#            . "The PHIPSI directory '$phipsi_dir' was not found.\n";
+#        }
+#  
+#        my $phipsi_command = 
+#          "$PLOT_PHIPSI $dir/$sub/$phipsi_dir/ "
+#                     . "res=$start_res "
+#                     . "ps=$dssp_res "
+#                     . "start=$START_EMPHASIS "
+#                     . "final=$FINAL_EMPHASIS "
+#                     . "title=\"$phipsi_title\" "
+#                     . "height=$PLOT_HEIGHT "
+#                     . "width=$PLOT_WIDTH "
+#                     . "2>&1 "
+#                     ;
+#        try_command ( "PhiPsi", $phipsi_command, "$dir/$sub" );
+#      } else {
+#        print "====== SKIPPING PHIPSI PLOT\n";
+#      }
+#    
+
+
+    }    
+} # END VCONT BLOCK
+
+
+    #===============================================================
+    #========================================================== RMSD
+    #========================================================== RMSF
+    #===================================================== RMSF TIME
+    #=================================================== RMSD MATRIX
+    #===============================================================
+
+RMSD: {
+    
+    $IMAGES{$dir}{$sub}{'rmsd'}         = 'skip';
+    $IMAGES{$dir}{$sub}{'rmsf'}         = 'skip';
+    $IMAGES{$dir}{$sub}{'rmsf_t'}       = 'skip';
+    $IMAGES{$dir}{$sub}{'rmsd_matrix'}  = 'skip';
+    
+   
+    chdir "$dir/$sub" 
+      or die "Couldn't chdir to '$dir/$sub' for RMSD analysis. $!";
+    
+    my $rmsd_dir = "rmsd";
+    my $rmsd_title = "- $title $sub";
+    my %rmsd_info = (
+      rmsd        => { filename=>'rmsd.dat',   type=>'basic',  title=>"RMSD $rmsd_title", },
+      rmsf        => { filename=>'rmsf.dat',   type=>'basic',  title=>"RMSF $rmsd_title", },
+      rmsf_t      => { filename=>'rmsf_t.dat', type=>'basic',  title=>"RMSF TIME $rmsd_title", },
+      rmsd_matrix => { filename=>'matrix.dat', type=>'matrix', title=>"RMSD MATRIX $rmsd_title", },
+    );
+ 
+    if ( not -e $rmsd_dir and $read_only ) { last RMSD };
+    
+    if ($ANALYSES{'rmsd'}) {
+      print "==== RMSD\n";
+      print "\tRMSD Directory: $rmsd_dir\n";
+      my %needs_rmsd = ();
+      
+      my $rmsd_png = get_png_name ( "$dir/$sub/$rmsd_dir", $rmsd_info{'rmsd'}{'title'} );
+      $IMAGES{$dir}{$sub}{'rmsd'}         = get_png_name ( "$dir/$sub/$rmsd_dir", $rmsd_info{'rmsd'       }{'title'} );
+      $IMAGES{$dir}{$sub}{'rmsf'}         = get_png_name ( "$dir/$sub/$rmsd_dir", $rmsd_info{'rmsf'       }{'title'} );
+      $IMAGES{$dir}{$sub}{'rmsf_t'}       = get_png_name ( "$dir/$sub/$rmsd_dir", $rmsd_info{'rmsf_t'     }{'title'} );
+      $IMAGES{$dir}{$sub}{'rmsd_matrix'}  = get_png_name ( "$dir/$sub/$rmsd_dir", $rmsd_info{'rmsd_matrix'}{'title'} );
+    
+      # Don't run analysis
+      if ( $read_only ) {
+        
+      #----- Determine if the directory is there
+      } elsif ( not -e $rmsd_dir ) {
+        print "\tRMSD directory not found.\n";
+        $rmsd_info{'all'}{'redo'} = 1;
+        $needs_rmsd{'all'} = 1;
+
+      #---- Determine if files are complete.
+      } else {
+        foreach my $anal ( keys %rmsd_info ) {
+          next if not $ANALYSES{$anal}; # skip unneeded analyses
+
+          # check file is there
+          my $file = "$rmsd_dir/$rmsd_info{$anal}{'filename'}";
+          if ( not -e $file ) { 
+            print "\tRMSD file '$file' for analysis '$anal' not found\n";
+            $needs_rmsd{ $rmsd_info{$anal}{'type'} } = 1;
+            next;
+          }
+        }
+         
+        # check all timepoints or residues are there
+        my $tp;
+
+        # rmsd (should have all timepoints)
+        if ( $ANALYSES{'rmsd'} and not $needs_rmsd{ $rmsd_info{'rmsd'}{'type'} } ) {
+          $tp = verify_file_has_all_timepoints ( 
+                  "$dir/$sub/$rmsd_dir/$rmsd_info{'rmsd'}{'filename'}", 
+                  $req_times_rmsd{'rmsd'} 
+                );
+          if ($tp > -1) {
+            print "\tRMSD analysis 'rmsd' data file is missing data point $tp\n";
+            $needs_rmsd{ $rmsd_info{'rmsd'}{'type'} } = 1;
+          }
+        }
+
+        # rmsf (should have all residues)
+        if ( $ANALYSES{'rmsf'} and not $needs_rmsd{ $rmsd_info{'rmsf'}{'type'} } ) {
+          my $length = (split / /, `wc -l $rmsd_dir/$rmsd_info{'rmsf'}{'filename'}`)[0];
+          if ( $length != $ilmm->{'residues'}  ) {
+            print "\tRMSD analysis 'rmsf' data file has the wrong number of residues (" 
+                . ($length) 
+                . " instead of $ilmm->{'residues'})\n";
+            $needs_rmsd{ $rmsd_info{'rmsf'}{'type'} } = 1;
+          }
+        }
+
+        # rmsf_t (should have all timepoint, at < 1/250ps resolution)
+        if ( $ANALYSES{'rmsf_t'} and not $needs_rmsd{ $rmsd_info{'rmsf_t'}{'type'} } ) {
+          my $length = (split / /, `wc -l $rmsd_dir/$rmsd_info{'rmsf_t'}{'filename'}`)[0] - 1;
+          if ( $length * 500 + 250 < $ilmm->{'total_time'} ) {
+            print "\tRMSD analysis 'rmsf_t' data file is missing data points.\n";
+            $needs_rmsd{ $rmsd_info{'rmsf_t'}{'type'} } = 1;
+          }
+        }
+            
+
+        # rmsd matrix (#timepoints x #timepoints matrix)
+        if ( $ANALYSES{'rmsd_matrix'} and not $needs_rmsd{ $rmsd_info{'rmsd_matrix'}{'type'} } ) {
+          my $file = "$rmsd_dir/$rmsd_info{'rmsd_matrix'}{'filename'}";
+          my $height = (split / /, `wc -l $file`          )[0] - 1;
+          my $width  = (split / /, `head -1 $file | wc -w`)[0] - 1;
+          if ( $height != $req_times_rmsd{'rmsd_matrix'} or$width != $req_times_rmsd{'rmsd_matrix'} ) {
+              print "\tRMSD analysis 'rmsd_matrix' data file is missing data points.\n";
+              $needs_rmsd{ $rmsd_info{'rmsd_matrix'}{'type'} } = 1;
+          }
+        }
+      } 
+
+      # Set all analysis types to run if needed.
+      for my $anal ( keys %rmsd_info ) {
+        next if not $ANALYSES{$anal};
+        if ( $needs_rmsd{'all'} 
+          or ( $OVERWRITE_ANALYSIS and not $simulation->{'read_only'} ) ) {
+            $needs_rmsd{ $rmsd_info{$anal}{'type'} } = 1;
+        }
+      }
+    
+      #=========================================== RUN RMSD ANALYSES
+
+      
+      #----------- MATRIX RMSD
+      # Do this one first, as it overwrites the standard RMSD analysis.  
+      # We'll usually want that one at a higher resolution.
+      if ( $needs_rmsd{'matrix'} ) {
+        print "====== EXECUTING RMSD MATRIX ANALYSIS\n";
+        `unlink rmsd_matrix.log` if -e "rmsd_matrix.log" and $RUN;
+        my $rmsd_matrix_line = ($RMSD_MATRIX_OVERRIDE or "rmsd $RMSD_MATRIX_SELECTION $RMSD_MATRIX_REFERENCE matrix");
+        my $rmsd_matrix_analysis_command = 
+          "$ANALYZE $protein rmsd_matrix $RMSD_MATRIX_RESOLUTION" . "ps \\\"$rmsd_matrix_line\\\" datadir=$dir/$sub targetdir=$dir/$sub $LIBRARIES 2>&1";
+
+        try_command ( "RMSD MATRIX ANALYSIS", $rmsd_matrix_analysis_command, "$dir/$sub");
+      } 
+
+      
+      #---------- BASIC RMSD
+      if ( $needs_rmsd{'basic'} ) {
+        print "====== EXECUTING RMSD BASIC ANALYSIS\n";
+        `unlink rmsd_basic.log` if -e "rmsd_basic.log" and $RUN;
+        my $rmsd_basic_line = ($RMSD_BASIC_OVERRIDE or "rmsd $RMSD_BASIC_SELECTION $RMSD_BASIC_REFERENCE nomatrix");
+        my $rmsd_basic_analysis_command = 
+          "$ANALYZE $protein rmsd_basic $RMSD_RESOLUTION" . "ps \\\"$rmsd_basic_line\\\" datadir=$dir/$sub targetdir=$dir/$sub $LIBRARIES 2>&1";
+
+        try_command ( "RMSD BASIC ANALYSIS", $rmsd_basic_analysis_command, "$dir/$sub");
+      
+      } 
+
+      
+      #---------- NO ANALYSIS NEEDED
+      if ( not $needs_rmsd{'basic'} and not $needs_rmsd{'matrix'} ) {
+        print "====== SKIPPING RMSD ANALYSIS\n";
+      }
+
+      #============================================== PLOT RMSD DATA
+
+      my $replot = 0; 
+      if ( $needs_rmsd{'basic'} 
+        or $OVERWRITE_PLOTS
+        ) {
+        $rmsd_info{'rmsd'       }{'replot'} = 1 if $ANALYSES{'rmsd'};
+        $rmsd_info{'rmsf'       }{'replot'} = 1 if $ANALYSES{'rmsf'};
+        $rmsd_info{'rmsf_t'     }{'replot'} = 1 if $ANALYSES{'rmsf_t'};
+        $rmsd_info{'rmsd_matrix'}{'replot'} = 1 if $ANALYSES{'rmsd_matrix'};
+        $replot = 1;
+      } 
+
+      my $rmsd_path = "$dir/$sub/$rmsd_dir";
+      foreach my $analysis ( 'rmsd', 'rmsf', 'rmsf_t', 'rmsd_matrix' ) {
+        next if not $ANALYSES{$analysis};
+        my $png = $IMAGES{$dir}{$sub}{$analysis};
+        if ( not -e $png
+          or -z $png
+          or ( $analysis ne 'rmsd_matrix' and ( -M $png > -M "$rmsd_path/rmsd.dat" ) )
+          or ( $analysis eq 'rmsd_matrix' and -e "$rmsd_path/matrix.dat"    and ( -M $png > -M "$rmsd_path/matrix.dat"    ) )
+          or ( $analysis eq 'rmsd_matrix' and -e "$rmsd_path/matrix.dat.gz" and ( -M $png > -M "$rmsd_path/matrix.dat.gz" ) )
+        ) {
+          $rmsd_info{$analysis}{'replot'} = 1;
+          $replot = 1;
+        }
+      }
+      
+  
+      # Crap, something went wrong.
+      if ( not $rmsd_dir or not -e $rmsd_dir ) {
+        die "RMSD analysis did not execute properly.\n"
+          . "The RMSD directory '$rmsd_dir' was not found.\n";
+      }
+  
+      # SOMETHING NEEDS REPLOTING
+      if ( $replot ) {
+        print "====== PLOTTING RMSD DATA\n";
+        if ( $rmsd_info{'rmsd'}{'replot'} ) {
+          my $rmsd_command = 
+            "$PLOT_RMSD $dir/$sub/$rmsd_dir/rmsd.dat "
+                      . "ps=$RMSD_RESOLUTION "
+                      . "title=\\\"$rmsd_info{'rmsd'}{'title'}\\\" "
+                      . "height=$PLOT_HEIGHT "
+                      . "width=$PLOT_WIDTH "
+                      . "maxrmsd=8 " 
+                      . "2>&1 "
+                      ;
+          try_command ( "RMSD", $rmsd_command, "$dir/$sub" );
+        }
+
+        if ( $rmsd_info{'rmsf'}{'replot'} ) {
+          my $rmsf_command = 
+            "$PLOT_RMSF $dir/$sub/$rmsd_dir/rmsf.dat "
+                      . "res=$start_res "
+                      . "title=\\\"$rmsd_info{'rmsf'}{'title'}\\\" "
+                      . "height=$PLOT_HEIGHT "
+                      . "width=$PLOT_WIDTH "
+                      . "2>&1 "
+                      ;
+          try_command ( "RMSF", $rmsf_command, "$dir/$sub" );
+        }
+        
+        if ( $rmsd_info{'rmsf_t'}{'replot'} ) {
+          my $rmsf_t_command = 
+            "$PLOT_RMSF_T $dir/$sub/$rmsd_dir/rmsf_t.dat "
+                      . "res=$start_res "
+                      . "title=\\\"$rmsd_info{'rmsf_t'}{'title'}\\\" "
+                      . "height=$PLOT_HEIGHT "
+                      . "width=$PLOT_WIDTH "
+                      . "2>&1 "
+                      ;
+          try_command ( "RMSF_T", $rmsf_t_command, "$dir/$sub" );
+        }
+
+        if ( $rmsd_info{'rmsd_matrix'}{'replot'} ) {
+          my $rmsd_matrix_command = 
+            "$PLOT_RMSD_MATRIX $dir/$sub/$rmsd_dir/matrix.dat "
+                      . "ps=$RMSD_MATRIX_RESOLUTION " 
+                      . "title=\\\"$rmsd_info{'rmsd_matrix'}{'title'}\\\" "
+                      . "height=$PLOT_HEIGHT "
+                      . "width=$PLOT_WIDTH "
+                      . "2>&1 "
+                      ;
+          try_command ( "RMSD_MATRIX", $rmsd_matrix_command, "$dir/$sub" );
+        }
+
+      } else {
+        print "====== SKIPPING DSSP PLOT\n";
+      }
+    }
+
+} # END RMSD BLOCK
+
+
+      
+
+
+
+
+
+    #===============================================================
+    #========================== IMAGE POST PROCESSING - SUBDIRECTORY
+    #===============================================================
+    
+    if ($ANALYSES{'sub_image'} or $ANALYSES{'sim_image'}) {
+    
+      my %images = %{$IMAGES{$dir}{$sub}};
+      my $sub_image_name = get_png_name ( "$dir/$sub", "SIM - $title $sub" );
+      $IMAGES{$dir}{$sub}{'image'} = $sub_image_name;
+
+      # I've decided to always run these (by setting needs_convert=1)
+      # because there is no way to tell if the analyses selected for
+      # plotting have changed between runs.  So just redo them, as 
+      # they happen pretty quickly anyway.
+      my $needs_convert = 1;
+      my $convert_broken = 0;
+      my $graph_count = 0;
+
+CONVERT_SUB: {
+  
+      # Test if it's even buildable, that the source images are defined and exist
+      foreach my $analysis ( @GRAPHED_ANALYSES ) {
+        next if not $ANALYSES{$analysis};
+        if ( not exists $images{$analysis}
+          or not defined $images{$analysis}
+          or not -e $images{$analysis} ) {
+          print "!!!!!! Missing image for analysis $analysis: $images{$analysis}\n";
+          $convert_broken = 1;
+          $IMAGES{$dir}{$sub}{'status'} = 'broken';
+          #last CONVERT_SUB;
+        } else {
+          $graph_count++;
+          if ( $WRITE_PICTURES ) {
+            my $COPY_COMMAND = "cp $IMAGES{$dir}{$sub}{$analysis} $PICTURE_DIR";
+            try_command ( "Copy Image $title $sub $analysis", $COPY_COMMAND, "$dir/$sub" );
+          }
+        }
+      }
+      
+      if ( not -e $sub_image_name ) {
+        $needs_convert = 1;
+      } else { 
+        my $sub_image_age = -M $sub_image_name;
+
+        # Check that the montage image is newer than this analysis image
+        foreach my $analysis ( @GRAPHED_ANALYSES ) {
+          next if $images{$analysis} eq 'skip';
+          next if $images{$analysis} eq 'broken';
+          if ( $sub_image_age > -M $images{$analysis} ) { 
+            $needs_convert = 1;
+            last CONVERT_SUB;
+          }
+        }
+      }
+} # END CONVERT_SUB
+    
+
+      if ( $graph_count and $needs_convert ) {
+      
+        print "==== BUILDING SUBDIRECTORY IMAGE\n";
+      
+        # Construct command
+        my $sub_image_command = "convert ";
+        foreach my $analysis ( @GRAPHED_ANALYSES ) {
+          if ( $ANALYSES{ $analysis } ) {
+            if ( $images{$analysis} ne 'skip' 
+             and $images{$analysis} ne 'broken' ) {
+               $sub_image_command .= $images{$analysis} . ' ';
+            }
+          }
+        }
+
+        $sub_image_command .= "-append $sub_image_name 2>&1 ";
+        
+        try_command ("Image $title $sub", $sub_image_command, "$dir/$sub");
+        if ( $WRITE_PICTURES ) {
+          my $COPY_COMMAND = "cp $sub_image_name $PICTURE_DIR";
+          try_command ( "Copy Image $title $sub sub image", $COPY_COMMAND, "$dir/$sub" );      
+        }
+      } elsif ( $convert_broken ) { 
+        print "==== SUBDIRECTORY IMAGE IS UNBUILDABLE\n";
+        $IMAGES{$dir}{$sub}{'image'} = 'skip';
+      } else { 
+        print "==== SUBDIRECTORY IMAGE IS CURRENT\n";
+      }
+    }      
+
+  } # /END SUBDIRECTORY
+
+
+
+  #=================================================================
+  #========================== IMAGE POST PROCESSING - SIMULATION SET
+  #=================================================================
+
+  if ($ANALYSES{'sim_image'}) {
+
+    next if not exists $IMAGES{$dir};
+    my %images = %{$IMAGES{$dir}};
+    my $sim_image_name = get_png_name ( "$dir", "GROUP - $title" );
+    $IMAGES{$dir}{'image'} = $sim_image_name;
+
+    # I've decided to always run these (by setting needs_convert=1)
+    # because there is no way to tell if the analyses selected for
+    # plotting have changed between runs.  So just redo them, as 
+    # they happen pretty quickly anyway.
+    my $needs_convert = 1; 
+    my $convert_broken = 0;
+    my $sub_count = 0;
+
+CONVERT: {
+
+    # Test that the images are buildable, that the source images are defined and exist
+    foreach my $sub ( @subdirs ) {
+      if ( not exists $images{$sub}{'image'}
+        or not defined $images{$sub}{'image'}
+        or not -e $images{$sub}{'image'} ) {
+          next if $images{$sub}{'image'} eq 'skip';
+          $convert_broken = 1;
+          print "!!!! Missing subdirectory image '$images{$sub}{'image'}'\n";
+          #last CONVERT;
+      } else {
+        $sub_count++;
+      }
+    }
+      
+    if ( not -e $sim_image_name ) {
+      $needs_convert = 1;
+    } else {
+
+      my $image_age = -M $sim_image_name;
+      foreach my $sub ( @subdirs ) {
+        # Check that the montage image is newer than this sub image
+        next if $images{$sub}{'image'} eq 'skip';
+        if ( $image_age > -M $images{$sub}{'image'} ) {
+          $needs_convert = 1;
+          last CONVERT;
+        }
+      }
+    }
+}
+
+    if ( $sub_count and $needs_convert ) {
+    #if ( not $convert_broken and $needs_convert ) {
+      print "== BUILDING DIRECTORY IMAGE\n";
+
+      # Construct command
+      my $sim_image_command = "convert ";
+      foreach my $sub ( @subdirs ) {
+        next if $images{$sub}{'image'} eq 'skip';
+        $sim_image_command .= $images{$sub}{'image'} . " ";
+      }
+      $sim_image_command .= " +append $sim_image_name 2>&1 ";
+   
+#    print "$sim_image_command\n";
+      try_command ( "Image $title", $sim_image_command, "$dir" );    
+      if ( $WRITE_PICTURES ) {
+        my $COPY_COMMAND = "cp $sim_image_name $PICTURE_DIR";
+        try_command ( "Copy Image $title sim image", $COPY_COMMAND, "$dir" );  
+      }
+    } elsif ( $convert_broken ) { print "== DIRECTORY IMAGE IS UNBUILDABLE\n"; 
+    } else {                      print "== DIRECTORY IMAGE IS CURRENT\n";
+    }
+  }
+
+  print "\n\n";
+}# /END SIMULATION
+
+
+
+####################################################################
+#                                                        SUBROUTINES
+####################################################################
+
+
+
+###################################################### DISCERN DEATH
+# Helper to subroutine try_command.  This sub processes the return
+# value of executed programs.
+
+
+sub discern_death {
+  my $program = $_[0];
+  my $value = $_[1];
+  
+  if ($value == -1) {
+	  print "!!!!! $program  Failed to execute: $!\n";
+  }
+  elsif ($value & 127) {
+	  printf "!!!!! $program  Child died with signal %d, %s coredump\n",
+    ($value & 127),  ($value & 128) ? 'with' : 'without';
+  }
+  else {
+  	printf "!!!!! $program  Child exited with value %d\n", $value >> 8;
+  }
+
+}
+
+
+######################################################## TRY COMMAND
+# Attempts to execute a command (if in RUN mode).  Processes any
+# return values.  Prints progress.
+
+sub try_command {
+  my $title     = $_[0];
+  my $command   = $_[1];
+  my $directory = $_[2];
+  
+  print "    $command\n";
+  my $result = system ( $command ) if $RUN;
+  #print "    $command\n" if not $RUN;
+  if ( $result ) { discern_death ( "$title died at $directory.", $? ); }
+}
+
+
+
+####################################################### GET PNG NAME
+# Translates a title in a shell safe name.
+# 1) changes whitespace to _'s.
+# 2) makes everything lower case
+
+sub get_png_name {
+  my $title = $_[0] . '/' . lc $_[1] . ".png";
+  $title =~ s/\s+/_/g;
+  return $title;
+}
+
+
+##################################### VERIFY FILE HAS ALL TIMEPOINTS
+# Loads a file and checks that all timepoints in the passed arrayref
+# occur in that tile.  Timepoints are assumed to be the first thing
+# on a line.  If a timepoint is missing, returns the missing
+# timepoint, else returns -1;
+
+sub verify_file_has_all_timepoints {
+  my $filename = $_[0]; 
+  my $timepoints = $_[1];
+  
+  my $file = `cat $filename`;
+  foreach my $t ( @$timepoints ) {
+    if ( not $file =~ /^$t/m ) {
+      return $t;
+    }
+  } 
+  return -1;
+}
+
+
+
+
+
+
